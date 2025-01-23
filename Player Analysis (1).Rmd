@@ -1,0 +1,462 @@
+---
+title: "Player Analysis"
+author: "Alaina Brady"
+date: "2024-12-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#Install necessary packages if not already installed
+# install.packages("cfbfastR")
+# install.packages("dplyr")
+# install.packages("caret")
+# install.packages("e1071")
+# install.packages("xgboost")
+# install.packages("randomForest")
+# install.packages("zoo")
+
+library(zoo)
+library(caret)
+library(dplyr)
+library(cfbfastR)
+library(xgboost)
+library(randomForest)
+library(reshape2)
+library(ggplot2)
+```
+
+```{r}
+usethis::edit_r_environ()
+```
+
+```{r}
+years <- c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024)
+
+# Loop over years
+for (year in years) {
+  # Fetch the data
+  player_usage <- cfbd_player_usage(year = year)
+  player_ppa <- cfbd_metrics_ppa_players_season(year = year)
+  
+  # Dynamically create variables named "2014_player_usage", "2014_player_ppa", etc.
+  assign(paste0(year, "_player_usage"), player_usage)
+  assign(paste0(year, "_player_ppa"), player_ppa)
+}
+```
+
+
+```{r}
+# Define the years
+years <- c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024)
+
+# Loop through each year to fetch and merge player usage and PPA data
+for (year in years) {
+  # Fetch the player usage and PPA data for the year
+  player_usage <- as.data.frame(get(paste0(year, "_player_usage")))  # Ensure it's a data frame
+  ppa <- as.data.frame(get(paste0(year, "_player_ppa")))  # Ensure it's a data frame
+  
+  # Check column names to make sure they match
+  print(colnames(player_usage))
+  print(colnames(ppa))
+  
+  # Merge the data frames for the current year
+  merged_data <- merge(
+    x = player_usage,
+    y = ppa,
+    by.x = "athlete_id",
+    by.y = "athlete_id",
+    all.x = TRUE,
+    all.y = TRUE
+  )
+  
+  # Dynamically create a dataframe for each year and store it
+  assign(paste0(year, "_usage_ppa"), merged_data)
+}
+```
+```{r}
+# Loop over the years from 2014 to 2024
+for (year in 2014:2024) {
+  # Construct the name of the dataframe dynamically
+  data_frame_name <- paste0(year, "_usage_ppa")
+  
+  # Get the data frame for the current year
+  year_data <- get(data_frame_name)
+  
+  # Remove rows where 'name.x' is NA
+  cleaned_data <- year_data %>%
+    dplyr::filter(!is.na(name.x))
+  
+  # Assign the cleaned data back to the dataframe
+  assign(data_frame_name, cleaned_data)
+}
+
+```
+
+```{r}
+View(`2014_usage_ppa`)
+```
+
+```{r}
+# Define the columns you want to keep (e.g., athlete_id, position, team)
+columns_to_keep <- c("name.x", "season.x", "position.x", "team.x", "usg_overall", "countable_plays", "avg_PPA_all")
+
+# Loop through each year and apply the filter and select columns
+for (year in 2014:2024) {
+  # Generate the name of the data frame dynamically (e.g., "2014_usage_ppa")
+  data_frame_name <- paste0(year, "_usage_ppa")
+  
+  # Get the data frame
+  year_data <- get(data_frame_name)
+  
+  # Select only the columns you want to keep
+  selected_data <- dplyr::select(year_data, all_of(columns_to_keep))
+  
+  # Store the selected data in a new variable (e.g., "2014_filtered_usage_ppa")
+  assign(paste0(year, "_filtered_usage_ppa"), selected_data)
+}
+```
+
+```{r}
+# Loop through the years from 2014 to 2024
+for (year in 2014:2024) {
+  # Construct the name of the dataframe dynamically
+  data_frame_name <- paste0(year, "_filtered_usage_ppa")
+  
+  # Get the data frame for the current year
+  year_data <- get(data_frame_name)
+  
+  # Order the data by 'team' and 'usg_overall' descending
+  ordered_data <- year_data %>%
+    dplyr::arrange(team.x, desc(usg_overall))
+  
+  # Assign the ordered data back to the dataframe
+  assign(data_frame_name, ordered_data)
+}
+
+```
+
+```{r}
+View(`2014_filtered_usage_ppa`)
+```
+
+```{r}
+# Loop through the years from 2014 to 2024
+for (year in 2014:2024) {
+  # Construct the name of the dataframe dynamically
+  data_frame_name <- paste0(year, "_filtered_usage_ppa")
+  
+  # Get the data frame for the current year
+  year_data <- get(data_frame_name)
+  
+  # Filter the top 15 rows by 'usg_overall' for each team
+  top_15_data <- year_data %>%
+    dplyr::group_by(team.x) %>%
+    dplyr::slice_max(usg_overall, n = 15, with_ties = TRUE) %>%
+    dplyr::ungroup()  # Remove the grouping after filtering
+  
+  # Dynamically create a new dataframe for the current year and store it
+  assign(paste0(year, "_top_15_usage_ppa"), top_15_data)
+}
+
+```
+
+```{r}
+View(`2014_top_15_usage_ppa`)
+```
+
+```{r}
+`2014_injuries` <- c("Matt Joeckel", "Frank Kee", "Shaun Nixon", "Devonte Fields", "Travis Green", "Jamal Palmer", "Desmine Hilliard", "Troy Baker", "William Crest Jr.", "Travis Bell", "Brandon Napoleon", "Jacky Marcellus", "Jared Barber", "Laquon Treadwell", "Kenyan Drake", "Braxton Miller", "JT Barrett", "Bralon Addison", "Tyler Johnstone", "Andre Yruretagoyena", "Brandon Facyson", "Luther Maddy", "Shai McKenzie", "Trey Edmunds", "Marshawn Williams", "Mark Shuman", "Brent Benedict", "Jonathan McLaughlin", "Venric Mark", "Joe Mixon", "Christian Jones", "DaVaris Daniels", "Braxton Deaver", "Tyler Johnstone", "Damien Robinson", "Alex Kozan", "Moise Larose", "Drew Carroll")
+complete_2014 <- `2014_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2014_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2015_injuries` <- c("Malik Zaire", "Taysom Hill", "James Connor", "Jonathan Williams", "Leon Allen", "Mike Dudek", "Cameron Smith", "John Ross", "Jaryd Jones-Smith", "Jordan Budwig", "Andrew Jelks", "Jeromy Irwin", "Marcus Jackson", "Eddie Vanderdoes", "Harold Brantley", "Jarron Jones", "James McFarland", "Myles Jack", "Ed Davis", "Nyeem Wartman-White", "Fabian Moreau", "Vayante Copeland", "Ranthony Texada", "Bryon Fields", "Ed Davis", "Jack Conklin", "Malik Zaire", "Durham Smythe", "Shaun Crawford", "Drue Tranquill", "Myles Jack", "Mile Williams", "Kenny Iloka", "Ty Slanina", "Kendall Fuller", "Byron Marshall")
+complete_2015 <-  `2015_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2015_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2016_injuries` <- c("Drew Barker", "Devon Allen", "Shaun Dion Hamilton", "Eddie Jackson", "Dakota Ball", "Josh Casher", "Azeem Victor", "Joe Mathis", "Tracy Sprinkle", "Justin Hilliard", "Cam Burrows", "Darius Slade", "Dylan Thompson", "Stephen Collier", "Malcolm Pridgeon", "Trevion Thompson", "Jake Fruhmorgen", "Eddie Jackson", "Vic Enwere", "Anthony Nash", "Mack Hollins", "Caleb Peterson")
+complete_2016 <-  `2016_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2016_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2017_injuries` <- c("Deondre Francois", "Tyrrell Pigrome", "Nick Starkel", "Jordan Scarlett", "Rick Wells", "Antonio Callaway", "James Robinson", "Kadeem Telfort", "Keivonnis Davis", "Ventrell Miller", "Richerd Desir-Jones", "Jordan Smith", "James Houston", "Dale Lloyd", "James Robinson", "Devante Peete", "Marcell Harris", "")
+complete_2017 <-  `2017_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2017_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2018_injuries` <- c("Morgan Ellison", "Cole Gest", "Mike Dudek", "K'Lavon Chaisson", "Felton Davis III", "D.K Metcalf", "Thaddeus Moss", "Messiah Swinson", "Kasim Hill", "Zack Moss", "Shaun Beyer", "Trevon Diggs", "Will Hastings", "Kendrick James", "Trevon Flowers", "Cody White", "Moroni Laulu-Putuau")
+complete_2018 <-  `2018_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2018_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2019_injuries` <- c("Jarett Garner", "Robert Snyder", "Xavier White", "Dylan Thomas", "Jack Answerson", "Gus Cumberlander", "Jalen Camp", "Kenny Cooper", "Marvin Grant", "Brittain Brown", "Lorenzo Harrison", "Jake Funk", "Patrick Lucas", "Daelin Hayes", "Chinedu Udeogu", "Coy Cronk", "Dylan Autenreith", "Jake Funk", "Blake Vinson", "Kevin Harris", "Tre Tipton", "Marcus Tillman", "Jahaziel Lee", "Jarek Broussard", "Jamauri Wakefield", "Colin Anderson", "Amir Abdur-Rahman", "Feleipe Franks", "Todd Harris", "Joshya Kaindoh", "Alec Murphy", "Markus Bailey", "Zander Neuville", "Walker Little", "Taijh Alston", "Patrice Rene", "Jashaun Corbin", "Will Craig", "Terry Wilson", "Jake Bentley", "TJ Green", "Jalen Nailor", "Keyshon Camp", "Ryan Armour", "Mike Epstein", "Adrian Jackson", "JR Waters", "Dorian Gerald", "JT Daniels", "Dylan Moses", "Sincere David", "Josh Bernhagen", "Jonathan Lewis", "Zach Slade","Durell Nchami", "Adam Harter", "Marquez Beason", "Gilbert Ibeneme", "Cameron Cantrell", "Deon Stewart", "Josh Calvert", "John Clark", "Solomon Tuliaupupu", "Christian Gaylord", "Darrius Bratton", "Baylor Cupp", "Hezekiah Jones", "Trey Sanders", "Josgua McMillon", "Monterio Hunt", "Rashad Weaver", "Tre Norwood"," Noah Daniels", "Emmit Gooden", "Quinn Carroll", "CJ McWilliams", "Devontae Davis", "Jeshaun Jones", "Jeremy Reichner", "Gabe Lloyd", "Noah Gatlin", "Cole Bunce")
+complete_2019 <-  `2019_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2019_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2021_injuries` <- c("Jaylen Dickerson", "Dylan Wonnum", "Josh Brooks", "Rico Powers", "Rick Fitten", "Sherrod Greene", "Luke Doty", "Rick Sandidge", "Rodarius Davis", "Jason Helfrich", "Taysir Mack", "Kenny Pickett", "Kenneth Walker III", "Jacub Camper", "Ricky White", "Chase Casteel", "Keyshawn Harris", "John Mitchell", "Milton Wright", "George Karlaftis", "David Bell", "J'Kory Cross", "Corey Trice", "Amir Yaseen", "Mershawn Rice", "Sam James", "Derrick Washington", "Jacob Cravaack", "Jake Eschenbach", "John Chenal", "Clay Large", "Hayden Rucci", "Chez Mellusi", "Alonzo Witt", "Clay Dundiff", "Isaac Guerendo", "Daryl McKinley", "Alexander Ashford", "Colin Dakovich", "Jermayne Jones", "Johnny Wilson", "Jay Ray", "Jalen He", "Jermayne Lole", "Jaquarii Roberson", "Jake Nash", "Chase Monroe", "D.J. Greene", "Charlie Large", "Henry Rucci", "Christian Mellusi", "Anthony Witt", "Colin Cundiff", "Isaac Guerendo", "Drew McKinley", "A.J. Ashford", "Carson Dakovich", "Jordan Jones", "Johnny Wilson", "Jalen Ray", "Jermer Jefferson", "Jermayne Lole", "Armani Archie", "Billy Gray", "Renard Bell", "Jacob Keller", "Kobe Lewis", "Devon McNary", "Tyrone Davis", "Ronaldo Stuart", "Josh Jobe", "John Metchie III", "Roydell Williams", "Camar Wheaton", "Jase McClellan", "Christopher Allen", "Arian Smith", "Jalen Kimber", "Rian Davis", "Tykee Smith", "Arik Gilbert", "Tate Ratledge", "Ronnie Bell", "Jahan Dotson", "Jaquan Brisker", "Ta'Quan Robserson", "Rasheed Walker", "Ellis Brooks", "P.J. Mustipher", "Otis Wormley", "Hakeem Beamon", "Kade Renfro", "Dorian Gerald", "Kyle Hamilton", "Avery Davis", "Blake Fisher", "Cane Berrong", "Joe Wilkins Jr.", "Osita Ekwonu", "Marist Liufau", "Tyler Goodson", "Ethan Hurkett", "Isaiah Epps", "Josh Ali", "Dekel Crowdus", "Keaton Upshaw", "Chauncey Thomas Jr.", "Jaren Krump", "Keegan Markgraf", "Viane Moala", "JaTravis Broughton", "R.J. Hubert", "Nicholas Petit-Frere", "Haskell Garrett", "Chris Olave", "Garrett Wilson", "Jaden McKenzie", "Marcus Crowley", "Harry Miller", "Noah Potter", "Jake Seibert", "Mitchell Melton", "Kamryn Babb", "Jakailin Johnson", "Josh Proctor", "Tyreke Friday", "Jaylen Johnson")
+complete_2021 <-  `2021_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2021_injuries`, 0, usg_overall))
+```
+
+```{r}
+# Define the list of injured players
+`2022_injuries` <- c("Reuben Owens", "Matt Myers", "Casey Case", "Ron Cook Jr.", "Al-Jay Henderson", 
+                     "Jamari Gassett", "Trevor Borland", "Derwin Burgess Jr.", "Amare Jones", "Sam Kenerson", 
+                     "Latrell Bullard", "Derrick Canteen", "Brandon Thomas", "Koby Drake", "Joe Scates", 
+                     "Warren Peeples", "Julian Barnett", "Joshua Hastings", "Logan Bonner", "Levi Williams", 
+                     "Robert Briggs", "John Gentry", "Kyle Van Leeuwen", "Xavier Williams", "Phillip Paea", 
+                     "John Ward", "Ajani Carter", "Michael Anyanwu", "Luke Marion", "Bryce Carpenter", 
+                     "Willie Lampkin", "Josaiah Stewart", "Manny Stokes", "Zxaequan Reeves", "Dre Pickney", 
+                     "Rajhai Harris", "Ryan Jones", "Avery Jones", "Elijah Robinson", "Shawn Dourseau", 
+                     "Spencer Sanders", "Dominic Richardson", "Jaden Bray", "Bryson Green", "Braylin Presley", 
+                     "Langston Anderson", "Eli Russ", "Brendon Evers", "Trace Ford", "Tyler Lacy", "Mason Cobb", 
+                     "Na'Drian Dizadare", "Thomas Harper", "Kanion Williams", "Graham Mertz", "Deacon Hill", 
+                     "Isaac Guerendo", "Braelon Allen", "Stephan Bracey", "Markus Allen", "Jaylan Franklin", 
+                     "Clay Cundiff", "Cam Dakovich", "Logan Brown", "Tyler Beach", "Joe Tippman", "Keeanu Benton", 
+                     "Tristan Monday", "Nick Herbig", "Semar Melvin", "Jay Shaw", "Justin Clark", "Titus Toler", 
+                     "Darrell Jarding Jr.", "Rocky Shelton II", "Tony Davis", "Mikey Keene", "John Rhys Plumlee", 
+                     "Ryan O'Keefe", "Jordan Johnson", "Amari Johnson", "Jordan Davis", "Terrence Lewis", 
+                     "Jeremiah Jean-Bapstiste", "Davonte Brown", "Travion Shadrick-Harris", "Malik Hornsby", 
+                     "Kade Renfro", "James Jointer", "Jadon Haselwood", "Ketron Jackson", "Warren Thompson", 
+                     "Trey Knox", "Ricky Knox", "Ricky Stromberg", "Isaiah Nichols", "Eric Thomas Jr.", "Drew Sanders", 
+                     "Bumper Pool", "Keuan Parker", "Myles Slusher", "Jalen Catalon", "Khari Johnson", "Daniel Hishaw", 
+                     "Steven McBride", "Lawrence Arnold", "Will Arnold", "Will Huggins", "James Livingston", 
+                     "Eriq Gilyard", "Gavin Potter", "Jarrett Paul", "Jacob Borcila", "Jay Butterfield", "Byron Cardwell", 
+                     "Sean Dollars", "Seven McGee", "Dont’e Thornton", "Terrell Tilmon", "Bram Walden", "Dawson Jaramillo", 
+                     "Bradyn Swinson", "Noah Sewell", "Justin Flowe", "Jackson LaDuke", "Adrian Jackson", "Christian Gonzalez", 
+                     "Malik Hornsby", "Kade Renfro", "James Jointer", "Jadon Haselwood", "Ketron Jackson", "Warren Thompson", 
+                     "Trey Knox", "Ricky Stromberg", "Isaiah Nichols", "Eric Thomas Jr.", "Drew Sanders", "Bumper Pool", 
+                     "Keuan Parker", "Myles Slusher", "Jalen Catalon", "Khari Johnson", "Daniel Hishaw", "Steven McBride", 
+                     "Lawrence Arnold", "Will Huggins", "James Livingston", "Eriq Gilyard", "Gavin Potter", "Jarrett Paul", 
+                     "Jacob Borcila", "Jay Butterfield", "Byron Cardwell", "Sean Dollars", "Seven McGee", "Dont’e Thornton", 
+                     "Terrell Tilmon", "Bram Walden", "Dawson Jaramillo", "Bradyn Swinson", "Noah Sewell", "Justin Flowe", 
+                     "Jackson LaDuke", "Adrian Jackson", "Christian Gonzalez", "Jacoby Criswell", "Devon Lawrence", 
+                     "Caleb Hood", "British Brooks", "Josh Downs", "Jahlil Taylor", "Keeshawn Silver", "Chris Collins", 
+                     "Raneiria Dillworth", "Sebastian Cheeks", "Noah Taylor", "Tony Grimes", "Storm Duck", "Dontae Balfour", 
+                     "Cam’Ron Kelly", "Jonathan Kim", "Donovan Smith", "Behren Morton", "Mason Tharp", "Michael Shanahan", 
+                     "Ethan Carde", "Philip Blidi", "Tyree Wilson", "Bryce Ramirez", "Reggie Pearson Jr.", "Kobee Minor", 
+                     "Luke Altmyer", "Isaiah Woullard", "Dannis Jackson", "Bralon Brown", "Michael Trigg", "Jalen Cunningham", 
+                     "Demon Clowney", "Brandon Mack", "Jaron Willis", "Miles Battle", "MJ Daniels", "Caden Costa", 
+                     "Sean Tucker", "Chris Elmore", "Courtney Jackson", "Isaiah Jones", "Anthony Queeley", "Matthew Bergeron", 
+                     "Terry Lockett", "Steve Linton", "Stefon Thompson", "Garrett Williams", "Darian Chestnut", "Ja’Had Carter", 
+                     "Tanner Morgan", "Chris Autman-Bell", "Gage Keys", "Austin Booker", "Braelen Oliver", "Jalen Glaze", 
+                     "Michael Dixon", "Steven Ortiz", "Nick Evers", "Eric Gray", "Theo Wease", "Trevon West", "Daniel Parker Jr.", 
+                     "Wanya Morris", "Anton Harrison", "Jalen Redmond", "Clayton Smith", "Shane Whitter", "Joshua Eaton", 
+                     "Kendall Dennis", "Winston Wright Jr.", "Darion Williamson", "Lloyd Willis", "Shambre Jackson", 
+                     "George Wilson Jr.", "Stephen Dix Jr.", "Sam McCall", "Hudson Card", "Bijan Robinson", "Roschon Johnson", 
+                     "Troy Omeire", "Isaiah Neyor", "Jaden Alexis", "Jahleel Billingsley", "Logan Parr", "Andrej Karic", 
+                     "DJ Harris", "Prince Dorbah", "Devin Richardson", "DeMarvion Overshown", "Jamier Johnson", 
+                     "JD Coffey III", "Junior Alexander", "Jack Westover", "Kuao Peihopa", "Cameron Williams", 
+                     "Billy Edwards Jr.", "Dontay Demus Jr.", "Jacob Copeland", "Rakim Jarrett", "CJ Dippre", "Weston Wolff", 
+                     "Ja’Khi Green", "Zion Shockley", "Austin Fontaine", "Tyler Baylor", "Ahmad McCullough", "Deonte Banks", 
+                     "Isaiah Hazel", "Shane Mosley", "Devin Leary", "M.J. Morris", "Demie Sumo-Karngbaye", "Devin Carter", 
+                     "Tyler Baker-Williams", "Jasiah Provillon", "Trent Pennix", "Grant Gibson", "Joshua Harris", 
+                     "Claude Larkins", "Savion Jackson", "Devan Boykin", "Joshua Pierre-Louis", "Kedon Slovis", "Nick Patti", 
+                     "Nate Yarnell", "Izzy Abanikanda", "Jaylon Barden", "Jaden Bradley", "Jared Wayne", "Gabe Houy", 
+                     "Carter Warren", "Calijah Kancey", "John Morgan III", "Nate Temple", "Sam Williams", "Deslin Alexandre", 
+                     "Habakkuk Baldonado", "SirVocea Dennis", "Brandon Hill", "Judson Tallandier II", "Chase Artopoeus", 
+                     "Martin Andrus Jr.", "Hayden Harris", "Kobey Fitzgerald", "Drew Pyne", "Tyler Buchner", "Avery Davis", 
+                     "Tobias Merriweather", "Joe Wilkins Jr.", "Michael Mayer", "Kevin Bauman", "Eli Raridon", "Cane Berrong", 
+                     "Jacob Lacey", "Isaiah Foskey", "Ositadinma Ekwonu", "Jayden Bellamy", "Cam Hart", "Marshawn Lloyd", 
+                     "Christian Beal-Smith", "Lovasea Carroll", "Josh Vann", "Corey Rucker", "Jalen Brooks", "Jaheim Bell", 
+                     "Austin Stogner", "Traevon Kenion", "Chad Terrell", "Dylan Wonnum", "Zacch Pickens", "Terrell Dawkins", 
+                     "Gilber Edmond", "Mohamed Kaba", "Cam Smith", "Darius Rush", "Joey Hunter", "R.J. Roderick", "David Spaulding", 
+                     "Tyrese Ross", "Devonni Reed", "Kurtis Rourke", "O’Shaan Allison", "Titus Swen", "Joey Braasch", 
+                     "Dawaiian McNeely", "D.Q. James", "Joshua Cobbs", "Oluwaseyi Omotosho", "Keonte Glinton", "Cam Stone", 
+                     "Hendon Hooker", "Jalin Hyatt", "Cedric Tillman", "Jimmy Calloway", "Jimmy Holiday", "Miles Campbell", 
+                     "Jordan Phillips", "Warren Burrell", "Dj Uiagalelei", "Kobe Pace", "Beaux Collins", "Decari Collins", 
+                     "EJ Williams", "Myles Murphy", "Trey Sanders", "Traeshon Holden", "Christian Leary", "JoJo Earle", 
+                     "Aaron Anderson", "Javion Cohen", "Tanner Bowles", "Amari Knight", "Tommy Brockermeyer", "Damieon George Jr.", 
+                     "Justin Eboigbe", "Demouy Kennedy", "Khyree Jackson", "Xavier Thomas", "Justin Foster", "Kevin Swint", 
+                     "Sergio Allen", "Vonta Bentley", "Trenton Simpson", "Malcolm Greene", "Fred Davis II", "Adrian Martinez", 
+                     "Malik Knowles", "Krew Jackson", "Ekow Boye-Doe", "TJ Smith", "Alex Padilla", "Spencer Petras", 
+                     "Gavin Williams", "Arland Bruce IV", "Keagan Johnson", "Sam LaPorta", "Josh Volk", "Jestin Jacobs", 
+                     "Cooper Dejean", "Terry Roberts", "Reggie Bracy", "Kaevon Merriweather", "Will Levis", "Chris Rodriguez", 
+                     "Kavosiey Smoke", "Ramon Jefferson", "Chris Lewis", "Chauncey Magwood", "DeMarcus Harris", "Tayvion Robinson", 
+                     "Keaton Upshaw", "John Young", "Kiyaunta Goodwin", "Carrington Valentine", "Quincy Brown", 
+                     "Caleb Medford", "Cade McNamara", "Alan Bowman", "Blake Corum", "Erick All", "Colston Loveland", 
+                     "Louis Hansen", "William Wagner", "Mazi Smith", "George Rooks", "Mark Morris", "Eyabi Okie", 
+                     "Caden Kolesar", "TreVeyon Henderson", "Miyan Williams", "Evan Pryor", "Jaxon Smith-Njigba", 
+                     "Matt Jones", "Teradja Mitchell", "Ladd McConkey", "Arik Gilbert", "Tate Ratledge", "Warren McClendon", 
+                     "Bill Norton", "Nolan Smith", "Dan Jackson", "Dillon Johnson", "Ke’Travion Hargrove", "J.J. Jernighan", 
+                     "Ke’Travion Hargrove", "Rara Thomas", "Zavion Thomas", "Scoobie Ford", "Collin Duncan", "Dylan Lawrence", 
+                     "DD Snyder", "Josh McCray", "Aidan Laughery", "Chase Brown", "Luke Ford", "Ezekiel Holmes", 
+                     "Devon Witherspoon", "Tahveon Nicholson", "Sydney Brown", "Justin Ibieta", "Cameron Carroll", 
+                     "Dea Dea McDougle", "Caleb Williams", "Travis Dye", "Michael Jackson III", "Jordan Addison", 
+                     "Brett Neilon", "Andrew Vorhees", "Kobe Pepe", "Romello Height", "Ralen Goforth", "Julien Simon", 
+                     "Jayden Daniels", "Armoni Goodwin", "Jack Bech", "Kyren Lacy", "Jaray Jenkins", "Chris Hilton Jr.", 
+                     "Kole Taylor", "Xavier Hill", "Cam Wire", "Marcus Dumervil", "Maason Smith", "Jaquelin Roy", "B.J. Ojulari", 
+                     "Ali Gaye", "Desmond Little", "Kolbe Fields", "Phillip Webb", "Jay Ward", "Sevyn Banks", 
+                     "Jaelyn Davis-Robinson", "Damarius McGhee", "Mekhi Garner", "Derrick Davis Jr.", "Aidan O’Connell", 
+                     "Kobe Lewis", "King Doerue", "Charlie Jones", "Elijah Canion", "Broc Thompson", "Payne Durham", 
+                     "Spencer Holstege", "Greg Hudgins III", "Cory Trice", "Chris Jefferson", "Christian Veilleux", 
+                     "Keyvone Lee", "Parker Washington", "Jaden Dottin", "Olumuyiwa Fashanu", "Rodney McGraw", 
+                     "Davon Townley Jr.", "Joey Porter Jr.", "Jeffrey Davis", "Tavion Thomas", "Dalton Kincaid", 
+                     "Tyler Wegis", "Ethan Calvert", "Malone Mataele", "Clark Phillips III")
+
+# Update the dataframe by setting `usg_overall` to 0 for injured players
+complete_2022 <- `2022_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2022_injuries`, 0, usg_overall))
+```
+
+```{r}
+`2023_injuries` <- c("Preston Stone", "Lawerence Keys", "Braeden Marshall", "Zane Herring", "Pat Garwo III", "Ryan O’Keefe", "George Takacs", "Scott Elliott", "Terry Moore", "Riley Leonard", "Jordan Travis", "Lawrance Toafili", "Leo Blackburn", "Jamie Felix", "Sylvain Yondjouen", "Brett Gabbert", "Emory Williams", "John Copenhaver", "WR Bryson Nesbit", "Kobe Paysour", "Deems May", "Garrett Shrader", "Carlos Del Rio-Wilson", "Nasir Peoples", "Jalen Stroman", "Johnny Langan", "Chez Mellusi", "Bryce Cabeldue", "Andrel Anthony", "Xavier Worthy", "Jonathan Brooks", "Jaylon Hutchings", "Tyler Owens", "Steve Linton", "Cole Spencer", "Jason Henderson", "JT Daniels", "Chris Conti", "Kacper Rutkiewicz", "Jacoby Jones", "CJ Harris", "Maddux Madsen", "Jacob Spomer", "Jett Elad", "Cooper Legas", "McCae Hillstead", "Avante Dickerson", "Taj Davis", "Jackson Sirmon", "Shilo Sanders", "Gary Bryant Jr.", "Damien Martinez", "Ethan Garbers", "Gary Smith", "Lander Barton", "Logan Fano", "Jonah Ellis", "Cameron Davis", "Rara Thomas", "Greg Brooks Jr.", "John Emery Jr.", "Bru McCoy", "Dont'e Thornton", "Noah Thomas", "Connor Weigman", "Terry Moore", "Zak Wallace", "Grayson McCall", "Juan Powell", "Jalen White", "Nathan Thomas", "La'Damian Webb", "Jordan Davis", "Carter Bradley", "Dorion Strawn", "Joey Hobert", "Chance Main", "Mitchell Evans")
+complete_2023 <-  `2023_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2023_injuries`, 0, usg_overall))
+```
+
+```{r}
+# Define the injuries list
+`2024_injuries` <- c("Deontae Lawson", "Quandarrius Robinson", "Keanu Koht", "Cole Adams", "Keon Sabb", 
+                     "Kaedin Robinson", "Jordyn Tyson", "Zechariah Sample", "Jayden Fortier", "Brian Battie", 
+                     "Sire Gaines", "Chris Marshall", "Owen McGowan", "Amari Jackson", "Alex Broome", 
+                     "Cynceir McNeal", "RJ Garcia II", "Camden Orth", "Shawn Thigpen", "Jaylon Tillman", 
+                     "Nakai Amachree", "Dom Grguri", "Enoch Nawahine", "SaVeon Brown", "Bobby Mays", 
+                     "Shey Williams", "George Wolo", "Gabe Goins", "Nik McMillan", "Justin Williams-Thomas", 
+                     "CJ Stokes", "Joey Beljan", "Phillip Wilder", "Mikah Coleman", "WR Troy Stellato", 
+                     "OL Elyjah Thurmon", "WR Tyler Brown", "Quinn Castner", "Dietrick Pennington", 
+                     "Ja’Vin Simpkins", "Max Balthazar", "Omarion Miller", "Terrell Timmons Jr.", 
+                     "Tory Horton", "Jaxxon Warren", "Tucker McDonald", "Nicky Dalmolin", "Jeremiah Hasley", 
+                     "Javious Bond", "Shavon Revel", "Dontae McMillan", "JT Bronaugh", "Porter Rooks", 
+                     "Jason Marshall Jr.", "Jamari Lyons", "Eugene Wilson III", "Graham Mertz", "Tj Abrams", 
+                     "Treyaun Webb", "Brian Green Jr.", "Caleb Rillos", "Asa Turner", "Kahleil Jackson", 
+                     "Keon Zipperer", "Andy Jean", "Josiah Freeman", "Malik Sherrod", "Joseph Jonah-Ajonye", 
+                     "Colbie Young", "Trey Cooley", "Brett Seither", "Kaden Feagin", "Ashton Hollins", 
+                     "Cole Rusk", "Drew Evans", "James Bomba", "Brody Kosin", "Brendan Sullivan", "Caleb Bacon", 
+                     "Daniel Jackson", "Brannon Spector", "Dallan Wright", "Tyler Purdy", "Jordan Funk", 
+                     "Isreal Moses", "DeShawn Hanika", "Jarred Sample", "Keaton Kubecka", "Christian Bodnar", 
+                     "Austin Henderson", "Darius Copeland", "Trey Holly", "Kyle Parker", "Harold Perkins Jr", 
+                     "Jelani Watkins", "Blake Baker", "Tayon Holloway", "Caullin Lacy", "Jamari Johnson", 
+                     "Jadon Thompson", "Elijah Metcalf", "Marcello Bussey", "Sutton Smith", "Ja’Den McBurrows", 
+                     "Leon Franklin", "Myles Pollard", "Rod Moore", "Malik Spencer", "Kaden Schickel", 
+                     "Michael Masunas", "Dillon Tatum", "Khalil Majeed", "Quentin Redding", "Kaeden Johnson", 
+                     "Pierce Walsh", "Henry Parrish Jr.", "Micah Pettus", "Nate Kalepo", "Salathiel Hemphill", 
+                     "Joshua Pfeifer", "Ayden Williams", "Hudson Wolfe", "Devin Price", "Izaiah Hartrup", 
+                     "Jeremy James", "Logan Diggs", "Connor Tollison", "Mookie Cooper", "Joe Moore", 
+                     "Khalil Jacobs", "Darris Smith", "Tyler Bradley", "Caden Fordham", "Barrett Liebentritt", 
+                     "Turner Corcoran", "Mac Markway", "Demitrius Bell", "Evan Wysong", "Jaylen Morgan", 
+                     "Bryson Nesbit", "Liam Boyd", "Max Johnson", "Juwuan Price", "Isheem Young", "Devon Akers", 
+                     "Jake Seibert", "Benjamin Morrison", "Charles Jagusah", "Boubacar Traore", "Kaden Hurst", 
+                     "Dom Dorwart", "Ryan McDole", "Seth McLaughlin", "Josh Simmons", "Rashid SeSay", 
+                     "Reis Stocksdale", "Roger Saleapaga", "Matthew Bedford", "Kyler Kasper", "Jahlil Florence", 
+                     "A.J. Pugliano", "Jack Ressler", "Travis Brashear", "Jam Griffin", "Jamai East", 
+                     "Jailen Holmes", "Jimmy Valsin III", "Anthony Donkoh", "Alonzo Ford Jr.", "Kaden Saunders", 
+                     "Ethan Black", "Mehki Flowers", "Cam Wallace", "Kevin Winston Jr.", "Andrew Rappleyea", 
+                     "Jaxon Smolik", "Jerry Cross", "Zuriah Fisher", "Peter Gonzalez", "Rodney Hammond Jr.", 
+                     "Censere Lee", "Daniel Carter", "Branson Taylor", "Logan Blake", "Tyler Needham", "Abram Wright", 
+                     "Samuel Brown V", "Bryan Felter", "AJ Surace", "Edd Guerrier", "Mohamed Toure", "Malikhi Miller", 
+                     "Brady Hunt", "Jakai Moore", "CJ Adams", "Reid Mikeska", "Byrum Brown", "K’Wan Powell", 
+                     "Gino Quinones", "Anthony Lucas", "Eric Gentry", "Raesjon Davis", "Jake Bailey", "RJ Maryland", 
+                     "Jaylan Knighton", "Zane Minors", "Camar Wheaton", "Zeed Haynes", "Will Nixon", "Keenan Pili", 
+                     "Emmanuel Okoye", "Jourdan Thomas", "Derek Williams Jr.", "Christian Clark", "Trey Owens", 
+                     "CJ Baxter", "Cyrus Allen", "Le’Veon Moss", "Mark Nabou", "Chase Curtis", "Major Everheart", 
+                     "Konner Fox", "Drew Donley", "Cam’Ron Valdez", "Joseph Adedire", "Charles Robinson", 
+                     "Oscar Cardenas", "DJ Allen", "De’Corian Clark", "Jaren Randle", "WR Marcellus Crutchfield", 
+                     "Jadarrius Perkins", "Luke Pawlak", "Kalieb Osborne", "Javon Brown", "Mike Drennen II", 
+                     "Lucas Laroche", "Braden Pegan", "Carter Shaw", "JonJon Vaughns", "Rico Flores Jr.", 
+                     "Dermaricus Davis", "Keanu Williams", "Gary Smith III", "Dovid Magna", "Deshun Murrell", 
+                     "Ben Wooldridge", "Money Parks", "Brandon Rose", "Brant Kuithe", "Sam Huard", "Cameron Rising", 
+                     "Kenan Johnson", "Brycen Coleman", "Mark Davis", "Xavier Brown", "Sage Ennis", "P.J. Prioleau", 
+                     "Jordan Tapscott", "Jalen Stroman", "Tucker Holloway", "Quentin Moore", "Ryan Otton", 
+                     "Charlie Crowell", "Andre Dollar", "Dylan Paine", "Traylon Ray", "Jaden Bray", "River Helms", 
+                     "Devaughn Mortimer", "Keshawn King", "Willie Berris", "Kyan Berry-Johnson", "Tyrell Henry", 
+                     "Chez Mellusi", "Tyler Van Dyke", "Joseph Griffin Jr.", "Rob Booker II", "Jadarrius Perkins", 
+                     "Luke Pawlak", "Kalieb Osborne", "Javon Brown", "Mike Drennen II", "Lucas Laroche", 
+                     "Dawaiian McNeely")
+
+# Apply the mutate function
+complete_2024 <- `2024_top_15_usage_ppa` %>%
+  mutate(usg_overall = ifelse(name.x %in% `2024_injuries`, 0, usg_overall))
+```
+
+```{r}
+complete_years <- c(2014, 2015, 2016, 2017, 2018, 2019, 2021, 2022, 2023, 2024)
+
+for (year in complete_years) {
+  data_frame_name <- paste0("complete_", year)
+  
+  year_data <- get(data_frame_name)
+  
+  cleaned_data <- year_data %>%
+  dplyr::mutate(inj_usg = usg_overall) %>%
+  dplyr::select(-usg_overall)
+  
+  assign(data_frame_name, cleaned_data)
+}
+```
+
+```{r}
+merge_years <- c(2014, 2015, 2016, 2017, 2018, 2019, 2021, 2022, 2023, 2024)
+
+
+for (year in merge_years) {
+  top_15_data <- as.data.frame(get(paste0(year, "_top_15_usage_ppa")))  # Ensure it's a data frame
+  injury <- as.data.frame(get(paste0("complete_",year)))  # Ensure it's a data frame
+  
+  # Merge the data frames for the current year
+  merged_data <- merge(
+    x = top_15_data,
+    y = injury,
+    by = "name.x",
+    all.x = TRUE,
+    all.y = TRUE
+  )
+  
+  # Dynamically create a dataframe for each year and store it
+  assign(paste0("final_", year), merged_data)
+}
+```
+
+```{r}
+# Define the columns you want to keep (e.g., athlete_id, position, team)
+columns_to_keep2 <- c("name.x", "season.x.x", "team.x.x", "usg_overall", "countable_plays.x", "avg_PPA_all.x", "inj_usg")
+
+# Loop through each year and apply the filter and select columns
+for (year in merge_years) {
+  # Generate the name of the data frame dynamically (e.g., "2014_usage_ppa")
+  data_frame_name <- paste0("final_", year)
+  
+  # Get the data frame
+  year_data <- get(data_frame_name)
+  
+  # Select only the columns you want to keep
+  selected_data <- dplyr::select(year_data, all_of(columns_to_keep2))
+  
+  # Store the selected data in a new variable (e.g., "2014_filtered_usage_ppa")
+  assign(paste0("final_", year), selected_data)
+}
+```
+
+```{r}
+all_data <- dplyr::bind_rows(final_2014, final_2015, final_2016, final_2017, final_2018, final_2019, final_2021, final_2022, final_2023)
+```
+
+```{r}
+final_product <- dplyr::select(all_data) %>%
+  dplyr::mutate(injured_worth = all_data$inj_usg * all_data$avg_PPA_all.x,
+                worth = all_data$usg_overall * all_data$avg_PPA_all.x,
+                season = all_data$season.x.x,
+                team = all_data$team.x.x,
+                name = all_data$name.x
+                ) 
+```
+
+```{r}
+names(all_data)
+```
+```{r}
+final_for_sure <- na.omit(final_product)
+```
+
+```{r}
+write.csv(final_for_sure, file = "final_for_sure.csv") 
+```
+

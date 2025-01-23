@@ -1,0 +1,110 @@
+---
+title: "coaches_cfbr_chicago"
+author: "John French"
+date: "2024-12-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(cfbfastR) # Load cfbfastR
+library(dplyr)
+library(tidyverse)
+```
+
+```{r}
+coach_import <- cfbd_coaches()
+
+all_coach <- coach_import |>
+  select(first_name, last_name, school, year, games, wins, srs) |>
+  mutate(FullName = paste(first_name, last_name)) |>  # Create FullName column
+  select(-first_name, -last_name)  |> 
+  select(FullName, everything())
+
+coach_2014 <- coach_import |>
+  select(first_name, last_name, school, year, games, wins, srs) |>
+  mutate(FullName = paste(first_name, last_name)) |>  # Create FullName column
+  select(-first_name, -last_name)  |> 
+  select(FullName, everything()) |>
+  filter(year >= 2014)
+
+coach_2014 <- na.omit(coach_2014)
+
+coach_2014 <- coach_data[!(coach_2014$FullName == "Marcus Freeman" & coach_2014$year == 2021), ]
+
+coach_2014$win_per <- coach_2014$wins/coach_2014$games
+```
+
+####### START HERE ######
+```{r}
+all_coach_data = read.csv("all_coach_data.csv") # Load in cleaned csv file
+
+all_coach_data <- na.omit(all_coach_data)
+```
+
+## Create all numerics for all coaches to be determined by
+```{r}
+all_coach_data$win_percent = all_coach_data$wins/all_coach_data$games
+all_coach_data <- all_coach_data |>
+  mutate(avg_wp = mean(win_percent))
+
+
+calculate_mean_win_percentage <- function(df) {
+  df <- df %>%
+    arrange(FullName, year) %>%
+    group_by(FullName) %>%
+    mutate(MeanWinPercentage = cummean(win_percent)) %>%
+    ungroup()
+  return(df)
+}
+
+calculate_mean_srs <- function(df) {
+  df <- df %>%
+    arrange(FullName, year) %>%
+    group_by(FullName) %>%
+    mutate(MeanSrs = cummean(srs)) %>%
+    ungroup()
+  return(df)
+}
+
+calculate_years_coached <- function(df) {
+  df <- df %>%
+    arrange(FullName, year) %>%
+    group_by(FullName) %>%
+    mutate(YearsCoached = row_number()) %>%
+    ungroup()
+  return(df)
+}
+
+all_coach_data <- calculate_mean_win_percentage(all_coach_data)
+all_coach_data <- calculate_mean_srs(all_coach_data)
+all_coach_data <- calculate_years_coached(all_coach_data)
+
+```
+
+```{r}
+
+## Specify which coaches we will need to look for in data frame
+
+playoff_coaches_2024 <- c("Dan Lanning", "Kirby Smart", "Spencer Danielson", "Kenny Dillingham", "Steve Sarkisian", "James Franklin", "Marcus Freeman", "Ryan Day", "Josh Heupel", "Curt Cignetti", "Rhett Lashlee", "Dabo Swinney")
+
+all_coach_data$rating = all_coach_data$MeanSrs+all_coach_data$MeanWinPercentage+all_coach_data$YearsCoached*.5
+```
+
+```{r}
+
+export_csv = all_coach_data |>
+  filter(year >= 2014)
+
+season_2024 = all_coach_data |>
+  filter(year == 2024)
+
+write.csv(export_csv, file = "coach_ratings.csv")
+```
+
+
+
+

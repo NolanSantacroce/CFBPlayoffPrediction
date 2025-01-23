@@ -1,0 +1,590 @@
+---
+title: "improved2"
+author: "paul trusela"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+# Install necessary packages if not already installed
+# install.packages("cfbfastR")
+# install.packages("dplyr")
+# install.packages("caret")
+# install.packages("e1071")
+# install.packages("xgboost")
+# install.packages("randomForest")
+# install.packages("zoo")
+
+library(zoo)
+library(caret)
+library(dplyr)
+library(cfbfastR)
+library(xgboost)
+library(randomForest)
+library(reshape2)
+library(ggplot2)
+```
+
+```{r}
+# Load play-by-play data for different seasons
+cfb_pbp23_test <- load_cfb_pbp(2021:2022)
+cfb_pbp19_22_train <- load_cfb_pbp(2014:2020)
+cfb_prediction2024 <- load_cfb_pbp(2023:2024)
+
+```
+
+```{r}
+# Function to aggregate game-level data and merge past stats for both teams
+aggregate_game_data <- function(pbp_data, window = 5) {
+  
+  # Extract final score from the last row of each game
+  final_scores <- pbp_data %>%
+    group_by(game_id) %>%
+    filter(row_number() == n()) %>%  # Select the last row for each game
+    summarise(
+      pos_team_final_score = pos_team_score,  # Final score for the pos_team
+      def_team_final_score = def_pos_team_score,  # Final score for the def_pos_team
+      pos_team = last(pos_team),  # Last team in possession
+      def_pos_team = last(def_pos_team),  # Last team defending
+      home = last(home),
+      away = last(away),
+      week = last(week),
+      year = last(year)
+    ) %>%
+    ungroup()
+
+  # Summarize past stats for each team
+  team_stats <- pbp_data %>%
+    filter(!is.na(EPA)) %>%
+    group_by(year, pos_team, week) %>%
+    summarise(
+      epa_per_play = mean(EPA, na.rm = TRUE),
+      epa_per_pass = mean(EPA[play_type %in% c("Pass", "Pass Incompletion",  "Pass Reception", "Passing Touchdown" )], na.rm = TRUE),
+      epa_per_rush = mean(EPA[play_type %in% c("Rush", "Rushing Touchdown")], na.rm = TRUE),
+      wpa_per_play = mean(wpa, na.rm = TRUE)
+    ) %>%
+    ungroup()
+  
+  # Add rolling averages (past `window` games) for each team
+  team_stats <- team_stats %>%
+    group_by(pos_team, year) %>%
+    arrange(week) %>%
+    mutate(
+      epa_per_play_last_n = zoo::rollapplyr(epa_per_play, window, mean, na.rm = TRUE, fill = NA, align = 'right'),
+      epa_per_pass_last_n = zoo::rollapplyr(epa_per_pass, window, mean, na.rm = TRUE, fill = NA, align = 'right'),
+      epa_per_rush_last_n = zoo::rollapplyr(epa_per_rush, window, mean, na.rm = TRUE, fill = NA, align = 'right'),
+      wpa_per_play_last_n = zoo::rollapplyr(wpa_per_play, window, mean, na.rm = TRUE, fill = NA, align = 'right')
+    ) %>%
+    ungroup()
+
+  # Merge stats for both teams in each game
+  game_data <- final_scores %>%
+    left_join(team_stats, by = c("year", "pos_team", "week")) %>%
+    rename_with(~ paste0("pos_team_", .), starts_with("epa_"), starts_with("wpa_")) %>%
+    left_join(team_stats, by = c("year", "def_pos_team" = "pos_team", "week")) %>%
+    rename_with(~ paste0("def_team_", .), starts_with("epa_"), starts_with("wpa_"))
+
+  return(game_data)
+}
+
+```
+
+```{r}
+window_size <- 5 
+season_level_data_train <- aggregate_game_data(cfb_pbp19_22_train, window = window_size)
+print(season_level_data_train)
+
+window_size <- 5
+season_level_data_test <- aggregate_game_data(cfb_pbp23_test, window = window_size)
+print(season_level_data_test)
+
+window_size <- 5
+season_level_data_predict <- aggregate_game_data(cfb_prediction2024, window = window_size)
+print(season_level_data_predict)
+
+```
+
+```{r}
+# Function to clean team names in a data frame
+clean_team_names <- function(data) {
+  data <- data %>%
+    mutate(
+      home = case_when(
+        home == "UT San Antonio" ~ "UTSA",
+        home == "Appalachian State" ~ "App State",
+        home == "UMass" ~ "Massachusetts",
+        home == "Southern Mississippi" ~ "Southern Miss",
+        home == "Connecticut" ~ "UConn",
+        home == "Louisiana Monroe" ~ "UL Monroe",
+        TRUE ~ home
+      ),
+      away = case_when(
+        away == "UT San Antonio" ~ "UTSA",
+        away == "Appalachian State" ~ "App State",
+        away == "UMass" ~ "Massachusetts",
+        away == "Southern Mississippi" ~ "Southern Miss",
+        away == "Connecticut" ~ "UConn",
+        away == "Louisiana Monroe" ~ "UL Monroe",
+        TRUE ~ away
+      )
+    ) %>%
+    filter(home != "James Madison" & away != "James Madison")  # Remove rows with James Madison
+  
+  return(data)
+}
+
+# Clean the team names for each data frame
+season_level_data_train <- clean_team_names(season_level_data_train)
+season_level_data_test <- clean_team_names(season_level_data_test)
+season_level_data_predict <- clean_team_names(season_level_data_predict)
+
+# Preview the cleaned data frames
+head(season_level_data_train)
+head(season_level_data_test)
+head(season_level_data_predict)
+
+```
+
+```{r}
+# Function to get SP+ ratings for a specific year
+get_sp_ratings <- function(year) {
+  sp_ratings <- cfbd_ratings_sp(year = year)
+  
+  # Select only the relevant columns
+  sp_ratings <- sp_ratings %>%
+    select(team, year, rating, offense_rating, defense_rating)
+  
+  return(sp_ratings)
+}
+
+# Load SP+ rankings for all relevant years
+sp_ratings_all_years <- lapply(2014:2024, get_sp_ratings) %>%
+  bind_rows()
+
+# Preview the SP+ data
+head(sp_ratings_all_years)
+```
+
+```{r}
+# Merge SP+ ratings into training data
+season_level_data_train <- season_level_data_train %>%
+  mutate(
+    home_team_epa_per_play_last_n = ifelse(home == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    home_team_epa_per_pass_last_n = ifelse(home == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    home_team_epa_per_rush_last_n = ifelse(home == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    home_team_wpa_per_play_last_n = ifelse(home == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y),
+    away_team_epa_per_play_last_n = ifelse(away == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    away_team_epa_per_pass_last_n = ifelse(away == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    away_team_epa_per_rush_last_n = ifelse(away == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    away_team_wpa_per_play_last_n = ifelse(away == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y)
+  )
+
+
+season_level_data_train$home_team_final_score <- ifelse(season_level_data_train$home == season_level_data_train$pos_team, season_level_data_train$pos_team_final_score, season_level_data_train$def_team_final_score)
+
+season_level_data_train$away_team_final_score <- ifelse(season_level_data_train$away == season_level_data_train$pos_team, season_level_data_train$pos_team_final_score, season_level_data_train$def_team_final_score)
+
+season_level_data_train$home_away_score_dif <- (season_level_data_train$home_team_final_score - season_level_data_train$away_team_final_score)
+
+# Merge SP+ ratings for the home team
+season_level_data_train <- season_level_data_train %>%
+  left_join(sp_ratings_all_years, by = c("home" = "team", "year" = "year")) %>%
+  rename(
+    home_team_sp_rating = rating,
+    home_team_offense_rating = offense_rating,
+    home_team_defense_rating = defense_rating
+  )
+
+# Merge SP+ ratings for the away team
+season_level_data_train <- season_level_data_train %>%
+  left_join(sp_ratings_all_years, by = c("away" = "team", "year" = "year")) %>%
+  rename(
+    away_team_sp_rating = rating,
+    away_team_offense_rating = offense_rating,
+    away_team_defense_rating = defense_rating
+  )
+
+```
+
+```{r}
+# Function to get ELO ratings for a specific year and week
+get_weekly_elo_ratings <- function(year, week) {
+  tryCatch({
+    elo_ratings <- cfbd_ratings_elo(year = year, week = week)
+    elo_ratings <- elo_ratings %>%
+      select(team, year, elo)  # Adjust columns as necessary
+    elo_ratings$week <- week  # Add the week as a new column
+    return(elo_ratings)
+  }, error = function(e) {
+    message(paste("Error fetching ELO ratings for year:", year, "week:", week))
+    return(NULL)  # Return NULL on error
+  })
+}
+
+# Initialize an empty list to store results
+elo_ratings_all_weeks <- list()
+
+# Loop through each year and week to get ELO ratings
+for (year in 2014:2024) {
+  for (week in 1:15) {  # Assuming there are 15 weeks in a season; adjust if necessary
+    weekly_ratings <- get_weekly_elo_ratings(year, week)
+    if (!is.null(weekly_ratings)) {
+      elo_ratings_all_weeks[[paste(year, week, sep = "_")]] <- weekly_ratings
+    }
+  }
+}
+
+# Combine all the results into a single data frame
+elo_ratings_combined <- bind_rows(elo_ratings_all_weeks)
+
+# Preview the ELO data
+head(elo_ratings_combined)
+
+# Merge ELO ratings for the home team
+season_level_data_train <- season_level_data_train %>%
+  left_join(elo_ratings_combined, by = c("home" = "team", "year" = "year", "week" = "week")) %>%
+  rename(home_team_elo_rating = elo)
+
+# Merge ELO ratings for the away team
+season_level_data_train <- season_level_data_train %>%
+  left_join(elo_ratings_combined, by = c("away" = "team", "year" = "year", "week" = "week")) %>%
+  rename(away_team_elo_rating = elo)
+
+# Update the training data to include ELO features
+train_dat <- season_level_data_train[, c(6:7, 26:33, 36:44)]  # Adjust columns to include ELO ratings
+train_dat_clean <- na.omit(train_dat)
+
+train_control <- trainControl(method="cv", number=10)
+grid <- expand.grid(mtry=c(2, 4, 6))
+final_model <- train(home_away_score_dif ~ ., data=train_dat_clean, method="rf", trControl=train_control, tuneGrid=grid)
+print(final_model)
+
+```
+
+```{r}
+# Merge SP+ ratings into testing data
+season_level_data_test <- season_level_data_test %>%
+  mutate(
+    home_team_epa_per_play_last_n = ifelse(home == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    home_team_epa_per_pass_last_n = ifelse(home == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    home_team_epa_per_rush_last_n = ifelse(home == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    home_team_wpa_per_play_last_n = ifelse(home == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y),
+    away_team_epa_per_play_last_n = ifelse(away == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    away_team_epa_per_pass_last_n = ifelse(away == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    away_team_epa_per_rush_last_n = ifelse(away == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    away_team_wpa_per_play_last_n = ifelse(away == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y)
+  )
+
+
+season_level_data_test$home_team_final_score <- ifelse(season_level_data_test$home == season_level_data_test$pos_team, season_level_data_test$pos_team_final_score, season_level_data_test$def_team_final_score)
+
+season_level_data_test$away_team_final_score <- ifelse(season_level_data_test$away == season_level_data_test$pos_team, season_level_data_test$pos_team_final_score, season_level_data_test$def_team_final_score)
+
+season_level_data_test$home_away_score_dif <- (season_level_data_test$home_team_final_score - season_level_data_test$away_team_final_score)
+
+# Merge SP+ ratings for the home team
+season_level_data_test <- season_level_data_test %>%
+  left_join(sp_ratings_all_years, by = c("home" = "team", "year" = "year")) %>%
+  rename(
+    home_team_sp_rating = rating,
+    home_team_offense_rating = offense_rating,
+    home_team_defense_rating = defense_rating
+  )
+
+# Merge SP+ ratings for the away team
+season_level_data_test <- season_level_data_test %>%
+  left_join(sp_ratings_all_years, by = c("away" = "team", "year" = "year")) %>%
+  rename(
+    away_team_sp_rating = rating,
+    away_team_offense_rating = offense_rating,
+    away_team_defense_rating = defense_rating
+  )
+
+# Merge ELO ratings for the home team
+season_level_data_test <- season_level_data_test %>%
+  left_join(elo_ratings_combined, by = c("home" = "team", "year" = "year", "week" = "week")) %>%
+  rename(home_team_elo_rating = elo)
+
+# Merge ELO ratings for the away team
+season_level_data_test <- season_level_data_test %>%
+  left_join(elo_ratings_combined, by = c("away" = "team", "year" = "year", "week" = "week")) %>%
+  rename(away_team_elo_rating = elo)
+
+# Update test data for predictions
+test_dat <- season_level_data_test[, c(6:7, 26:33, 36:44)]  # Adjust columns to include ELO ratings
+test_dat_clean <- na.omit(test_dat)
+
+cfb_prediction <- predict(final_model, test_dat_clean)
+
+binary_predictions <- ifelse(cfb_prediction >= 0, "win", "loss")
+actual_values <- ifelse(test_dat_clean$home_away_score_dif >= 0, "win", "loss")
+
+confusion <- confusionMatrix(as.factor(binary_predictions), as.factor(actual_values))
+
+print(confusion)
+
+```
+
+```{r}
+
+season_level_data_predict <- season_level_data_predict %>%
+  mutate(
+    home_team_epa_per_play_last_n = ifelse(home == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    home_team_epa_per_pass_last_n = ifelse(home == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    home_team_epa_per_rush_last_n = ifelse(home == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    home_team_wpa_per_play_last_n = ifelse(home == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y),
+    away_team_epa_per_play_last_n = ifelse(away == pos_team, pos_team_epa_per_play_last_n, def_team_epa_per_play_last_n),
+    away_team_epa_per_pass_last_n = ifelse(away == pos_team, pos_team_epa_per_pass_last_n, def_team_epa_per_pass_last_n),
+    away_team_epa_per_rush_last_n = ifelse(away == pos_team, pos_team_epa_per_rush_last_n, def_team_epa_per_rush_last_n),
+    away_team_wpa_per_play_last_n = ifelse(away == pos_team, wpa_per_play_last_n.x, wpa_per_play_last_n.y)
+  )
+# season_level_data_predict <- na.omit(season_level_data_predict)
+
+season_level_data_predict$home_team_final_score <- ifelse(season_level_data_predict$home == season_level_data_predict$pos_team, season_level_data_predict$pos_team_final_score, season_level_data_predict$def_team_final_score)
+
+season_level_data_predict$away_team_final_score <- ifelse(season_level_data_predict$away == season_level_data_predict$pos_team, season_level_data_predict$pos_team_final_score, season_level_data_predict$def_team_final_score)
+
+season_level_data_predict$home_away_score_dif <- (season_level_data_predict$home_team_final_score - season_level_data_predict$away_team_final_score)
+
+# Merge SP+ ratings for the home team
+season_level_data_predict <- season_level_data_predict %>%
+  left_join(sp_ratings_all_years, by = c("home" = "team", "year" = "year")) %>%
+  rename(
+    home_team_sp_rating = rating,
+    home_team_offense_rating = offense_rating,
+    home_team_defense_rating = defense_rating
+  )
+
+# Merge SP+ ratings for the away team
+season_level_data_predict <- season_level_data_predict %>%
+  left_join(sp_ratings_all_years, by = c("away" = "team", "year" = "year")) %>%
+  rename(
+    away_team_sp_rating = rating,
+    away_team_offense_rating = offense_rating,
+    away_team_defense_rating = defense_rating
+  )
+
+# Merge ELO ratings for the home team
+season_level_data_predict <- season_level_data_predict %>%
+  left_join(elo_ratings_combined, by = c("home" = "team", "year" = "year", "week" = "week")) %>%
+  rename(home_team_elo_rating = elo)
+
+# Merge ELO ratings for the away team
+season_level_data_predict <- season_level_data_predict %>%
+  left_join(elo_ratings_combined, by = c("away" = "team", "year" = "year", "week" = "week")) %>%
+  rename(away_team_elo_rating = elo)
+
+# Update prediction data for predictions
+predict_dat <- season_level_data_predict[, c(6:9, 26:33, 36:44)]  # Adjust to include ELO columns
+predict_dat_clean <- na.omit(predict_dat)
+
+```
+
+```{r}
+print(names(predict_dat_clean))
+```
+
+
+```{r}
+# Function to predict the winner of a game
+predict_winner <- function(home_team, away_team, model, data) {
+  
+  # Retrieve the most recent game for the home team
+  home_game <- data %>%
+    filter(home == home_team) %>%
+    arrange(desc(year), desc(week)) %>%
+    head(1)
+  
+  # Retrieve the most recent game for the away team
+  away_game <- data %>%
+    filter(away == away_team) %>%
+    arrange(desc(year), desc(week)) %>%
+    head(1)
+
+  # Create a new row with the relevant features for prediction
+  new_row <- data.frame(
+    home = home_team,
+    away = away_team,
+    home_away_score_dif = NA,  # Placeholder for the outcome
+    home_team_epa_per_play_last_n = home_game$home_team_epa_per_play_last_n,
+    home_team_epa_per_pass_last_n = home_game$home_team_epa_per_pass_last_n,
+    home_team_epa_per_rush_last_n = home_game$home_team_epa_per_rush_last_n,
+    home_team_wpa_per_play_last_n = home_game$home_team_wpa_per_play_last_n,
+    away_team_epa_per_play_last_n = away_game$away_team_epa_per_play_last_n,
+    away_team_epa_per_pass_last_n = away_game$away_team_epa_per_pass_last_n,
+    away_team_epa_per_rush_last_n = away_game$away_team_epa_per_rush_last_n,
+    away_team_wpa_per_play_last_n = away_game$away_team_wpa_per_play_last_n,
+    home_team_sp_rating = home_game$home_team_sp_rating,
+    home_team_offense_rating = home_game$home_team_offense_rating,
+    home_team_defense_rating = home_game$home_team_defense_rating,
+    away_team_sp_rating = away_game$away_team_sp_rating,
+    away_team_offense_rating = away_game$away_team_offense_rating,
+    away_team_defense_rating = away_game$away_team_defense_rating,
+    home_team_elo_rating = home_game$home_team_elo_rating,
+    away_team_elo_rating = away_game$away_team_elo_rating
+  )
+  
+  # Use the model to predict the score differential
+  prediction <- predict(model, new_row)
+
+  # Determine the predicted winner based on the score differential
+  predicted_winner <- ifelse(prediction >= 0, home_team, away_team)
+  
+  return(list(predicted_winner = predicted_winner, score_differential = prediction))
+}
+
+```
+
+```{r}
+unique_schools <- unique(c(predict_dat_clean$home, predict_dat_clean$away))
+sorted_schools <- sort(unique_schools)
+print(sorted_schools)
+```
+
+```{r}
+# Example usage
+away_team <- "Notre Dame"
+home_team <- "Georgia"
+
+result <- predict_winner(home_team, away_team, final_model, predict_dat_clean)
+print(paste("Predicted winner:", result$predicted_winner))
+print(paste("Predicted score differential:", result$score_differential))
+
+```
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Create the data frame
+QB_player_stats <- data.frame(
+  RANK = c(6, 13, 18, 23, 27, 35, 39, 54, 74, 97, 108, 157),
+  NAME = c("Kurtis Rourke", "Dillon Gabriel", "Cade Klubnik", "Sam Leavitt", "Riley Leonard", "Drew Allar", "Kevin Jennings", "Will Howard", "Carson Beck", "Nico Iamaleava", "Maddux Madsen", "Quinn Ewers"),
+  TEAM = c("INDIANA", "OREGON", "CLEMSON", "ARIZONA ST", "NOTRE DAME", "PENN STATE", "SMU", "OHIO STATE", "GEORGIA", "TENNESSEE", "BOISE ST", "TEXAS"),
+  Player_Number = c(9, 8, 2, 10, 13, 15, 7, 18, 15, 8, 4, 3),
+  OFF = c(91.7, 90.4, 89.8, 88.6, 87.6, 85.9, 85.3, 82.6, 80.2, 78.0, 76.7, 72.2),
+  PASS = c(92.4, 90.1, 87.4, 84.5, 78.4, 82.7, 85.9, 82.8, 79.2, 81.4, 72.4, 71.7),
+  RUN = c(45.7, 64.9, 70.0, 75.8, 82.7, 75.2, 61.8, 61.1, 62.2, 52.9, 70.9, 55.6),
+  RECV = c(54.3, 54.3, 51.6, 60.0, NA, 53.0, 57.5, NA, 60.0, 60.0, NA, 54.3),
+  PBLK = c(60.2, 60.2, 62.2, 60.5, 60.0, 62.1, 62.2, 62.2, 60.0, 60.0, 60.2, 62.2),
+  RBLK = c(644, 873, 862, 780, 683, 745, 803, 673, 846, 772, 865, 697),
+  OFF_Rank = c(340, 462, 523, 383, 365, 387, 418, 353, 529, 398, 419, 408),
+  PASS_Rank = c(15, 40, 63, 50, 82, 28, 60, 55, 25, 31, 28, 13),
+  RUN_Rank = c(1, 1, 1, 1, 1, 8, 2, 1, 1, 1, 1, 1),
+  RECV_Rank = c(1, 1, 1, 1, NA, 1, 1, NA, 1, 1, NA, 1),
+  PBLK_Rank = c(288, 370, 273, 346, 236, 322, 322, 264, 292, 343, 418, 274),
+  RBLK_Rank = c(6.5, 6.0, 6.2, 6.2, 6.4, 6.5, 6.0, 6.4, 6.4, 6.6, 5.10, 6.2)
+)
+
+# View the data frame
+print(QB_player_stats)
+
+```
+```{r}
+# Create the dataframe
+player_stats <- data.frame(
+  Rank = c(13, 27, 28, 35, 37, 40, 52, 56, 94, 111, 126, 133, 183, 195, 245, 249, 258, 258, 286, 309, 347, 375, 375, 431, 436, 446, 474, 474, 481),
+  Name = c("Tez Johnson", "Jordyn Tyson", "Jeremiah Smith", "Dont'e Thornton Jr.", "Omar Cooper Jr.", "Ke'Shawn Williams", "Emeke Egbuka", "Elijah Sarratt", "Myles Price", "Cam Camper", "Antonio Williams", "Harrison Wallace III", "Carnell Tate", "Jaden Greathouse", "Bryant Wesco Jr.", "Roderick Daniels Jr.", "Isaiah Bond", "Matthew Golden", "Latrell Caples", "Key'Shawn Smith", "Austin Bolt", "Ryan Wingo", "Troy Stellato", "Jake Bailey", "Moochie Dixon", "DeAndre Moore Jr.", "Dillon Bell", "Miles Cross", "Bru McCoy"),
+  Team = c("OREGON", "ARIZONA ST", "OHIO STATE", "TENNESSEE", "INDIANA", "INDIANA", "OHIO STATE", "INDIANA", "INDIANA", "BOISE ST", "CLEMSON", "PENN STATE", "OHIO STATE", "NOTRE DAME", "CLEMSON", "SMU", "TEXAS", "TEXAS", "BOISE ST", "SMU", "BOISE ST", "TEXAS", "CLEMSON", "SMU", "SMU", "TEXAS", "GEORGIA", "INDIANA", "TENNESSEE"),
+  Number = c(15, 0, 4, 1, 3, 5, 2, 13, 4, 9, 0, 6, 17, 1, 12, 13, 7, 2, 3, 9, 81, 5, 10, 12, 5, 0, 86, 19, 5),
+  OFF = c(85.6, 83.8, 83.7, 82.4, 82.3, 82.1, 80.6, 80.4, 77.9, 76.9, 75.9, 75.4, 72.9, 72.6, 70.8, 70.6, 70.3, 70.3, 69.5, 68.9, 68.2, 67.5, 67.5, 66.5, 66.3, 66.2, 65.5, 65.5, 65.4),
+  PASS = c(50.4, NA, NA, NA, NA, 60.0, NA, NA, NA, NA, 89.7, NA, NA, NA, NA, 29.3, NA, 49.3, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RUN = c(NA, 57.7, 66.9, NA, 68.4, 67.6, 63.5, NA, 71.0, NA, 79.3, NA, NA, NA, 72.1, 65.9, 83.7, NA, NA, NA, NA, 86.4, 63.2, NA, NA, NA, 79.6, 67.8, 61.2),
+  RECV = c(89.7, 87.1, 85.3, 83.1, 83.0, 82.5, 82.9, 81.3, 78.2, 75.8, 74.8, 75.7, 72.9, 72.0, 72.1, 77.2, 72.0, 71.3, 71.0, 68.7, 65.6, 64.5, 66.3, 66.2, 66.6, 66.4, 63.5, 67.8, 63.7),
+  PBLK = c(NA, NA, 61.0, NA, NA, NA, 62.6, NA, NA, NA, 52.2, NA, NA, NA, 45.6, 32.6, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 49.0, 62.8),
+  RBLK = c(54.8, 61.0, 54.7, 61.4, 71.1, 60.6, 67.4, 60.6, 56.6, NA, NA, 61.5, 61.1, 66.5, 47.5, 47.5, 60.2, NA, 59.7, 62.5, 77.4, 66.9, 67.5, 70.9, 63.9, 76.2, 53.5, 49.0, 72.8),
+  OFF_Rank = c(525, 738, 566, 322, 418, 309, 565, 629, 290, 600, 675, 526, 519, 324, 440, 541, 486, 707, 558, 606, 348, 444, 314, 300, 446, 401, 566, 448, 546),
+  PASS_Rank = c(1, NA, NA, NA, NA, 4, 1, NA, NA, NA, 2, NA, NA, NA, NA, 41, NA, 2, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RUN_Rank = c(NA, 1, 4, NA, 2, 2, 4, NA, 5, NA, 5, NA, NA, NA, NA, 8, 3, NA, NA, NA, NA, 3, 1, NA, NA, NA, 9, NA, NA),
+  RECV_Rank = c(312, 377, 315, 166, 218, 167, 312, 326, 180, 339, 416, 309, 298, 194, 292, 310, 293, 406, 280, 326, 129, 228, 196, 167, 235, 261, 364, 231, 280),
+  PBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA)
+)
+
+# Print the dataframe
+print(player_stats)
+
+```
+```{r}
+# Create the dataframe
+player_stats_2 <- data.frame(
+  Rank = c(481, 502, 522, 583, 594, 601, 623, 640, 640, 643, 686, 731, 734, 761, 773, 790, 805, 880, 923, 930),
+  Name = c("T.J. Moore", "Evan Stewart", "Dominic Lovett", "Omari Evans", "Traeshon Holden", "Jordan Hudson", "Cole Turner", "Squirrel White", "Beaux Collins", "Kris Mitchell", "London Humphreys", "Prince Strachan", "Liam Clifford", "Chris Brazzell II", "Justius Lowe", "Xavier Gutierry", "Arian Smith", "Chas Nimrod", "Julian Fleming", "Melquan Stovall"),
+  Team = c("CLEMSON", "OREGON", "GEORGIA", "PENN STATE", "OREGON", "SMU", "CLEMSON", "TENNESSEE", "NOTRE DAME", "NOTRE DAME", "GEORGIA", "BOISE ST", "PENN STATE", "TENNESSEE", "OREGON", "ARIZONA ST", "GEORGIA", "TENNESSEE", "PENN STATE", "ARIZONA ST"),
+  Number = c(1, 7, 6, 5, 1, 8, 22, 3, 5, 10, 16, 17, 2, 17, 14, 1, 11, 11, 3, 5),
+  OFF = c(65.4, 65.0, 64.5, 63.2, 63.0, 62.8, 62.3, 62.0, 62.0, 61.9, 61.1, 60.2, 60.1, 59.1, 58.8, 58.3, 57.9, 55.8, 54.8, 54.3),
+  PASS = c(NA, NA, NA, 57.6, NA, NA, 71.9, NA, NA, NA, NA, NA, 63.3, NA, NA, NA, 70.7, NA, NA, NA),
+  RUN = c(NA, NA, NA, NA, 60.8, 57.5, 61.6, NA, NA, NA, 59.8, 60.8, 60.0, 59.4, 58.5, 58.9, 57.4, 57.2, 53.7, 59.2),
+  RECV = c(65.9, 67.3, 66.1, 64.6, 62.3, 63.5, 61.6, 62.9, 60.7, 61.6, 60.9, 60.3, 76.2, 56.6, 58.1, 61.1, 55.0, 47.2, 62.1, 63.8),
+  PBLK = c(55.2, 46.6, 39.6, 58.9, 70.2, 65.4, 60.0, 52.0, 68.4, 65.1, 66.9, 60.3, 55.0, 56.6, 58.1, 54.5, 55.0, 47.2, 64.7, 54.0),
+  RBLK = c(480, 693, 510, 329, 610, 486, 285, 416, 518, 387, 315, 407, 474, 517, 337, 643, 632, 237, 409, 558),
+  OFF_Rank = c(NA, NA, NA, 1, NA, 1, 4, NA, NA, NA, 1, NA, 2, NA, NA, 1, 3, NA, NA, 1),
+  PASS_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 1, NA, NA, NA, NA, NA, NA, NA),
+  RUN_Rank = c(NA, NA, NA, NA, 2, 1, NA, NA, NA, NA, NA, NA, 2, NA, NA, NA, NA, NA, NA, 1),
+  RECV_Rank = c(319, 408, 374, 204, 328, 253, 163, 232, 282, 224, 177, 226, 232, 268, 176, 322, 413, 131, 204, 292),
+  PBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA)
+)
+
+# Print the dataframe
+print(player_stats_2)
+
+#combine the two dataframes
+WR_player_stats <- rbind.data.frame(player_stats, player_stats_2)
+```
+
+```{r}
+
+# Create the data frame
+RB_player_stats <- data.frame(
+  Rank = c(1, 7, 9, 10, 13, 25, 28, 36, 41, 52, 54, 88, 100, 108, 139, 166, 187, 234, 267, 380),
+  Name = c("Ashton Jeanty", "Jeremiyah Love", "Cam Skattebo", "Dylan Sampson", "Brashard Smith", "Jordan James", "Quinshon Judkins", "Trevor Etienne", "Justice Ellison", "Treyvon Henderson", "Nicholas Singleton", "Quintrevion Wisner", "Nate Frazier", "Jadarian Price", "Kaytron Allen", "Ty'Son Lawton", "Noah Whittington", "Phil Mafah", "Jaydon Blue", "L.J. Johnson Jr."),
+  Team = c("Boise St", "Notre Dame", "Arizona St", "Tennessee", "SMU", "Oregon", "Ohio State", "Georgia", "Indiana", "Ohio State", "Penn State", "Texas", "Georgia", "Notre Dame", "Penn State", "Indiana", "Oregon", "Clemson", "Texas", "SMU"),
+  Player_Number = c(2, 4, 4, 6, 1, 20, 1, 1, 6, 32, 10, 26, 3, 24, 13, 17, 6, 7, 23, 11),
+  OFF = c(95.8, 91.9, 91.4, 90.7, 90.3, 86.7, 86.3, 85.3, 84.8, 83.5, 83.1, 80.4, 79.4, 78.9, 77.0, 75.5, 74.6, 73.0, 71.9, 66.7),
+  PASS = c(NA, NA, 60.0, NA, NA, NA, NA, NA, 34.4, NA, NA, NA, NA, NA, NA, 46.8, NA, NA, NA, 60.0),
+  RUN = c(97.5, 92.2, 92.3, 90.9, 86.7, 91.3, 88.1, 89.9, 86.8, 88.4, 83.7, 84.1, 83.9, 81.9, 81.2, 78.0, 79.3, 80.7, 75.7, 68.9),
+  RECV = c(52.4, 76.8, 77.6, 67.9, 70.7, 53.0, 67.5, 67.9, 63.7, 70.5, 77.5, 63.0, 39.0, 52.4, 54.4, 67.2, 54.7, 44.0, 63.3, 69.5),
+  PBLK = c(51.4, 58.3, 46.8, 56.4, 49.2, 38.8, 28.4, 74.2, 53.0, 39.4, 54.0, 53.5, 77.6, 65.5, 61.0, 21.4, 51.9, 59.6, 37.9, 55.8),
+  RBLK = c(58.7, 78.2, 50.5, 56.3, 50.9, 50.9, 54.8, 58.5, 62.4, 67.8, 61.2, 54.7, 56.6, 53.2, 43.6, 60.1, 63.5, 54.1, 57.1, 57.9),
+  OFF_Rank = c(NA, NA, 1, NA, NA, NA, NA, 1, 1, NA, NA, NA, NA, NA, NA, 1, NA, NA, NA, 1),
+  PASS_Rank = c(NA, NA, 266, NA, NA, NA, NA, 114, 150, NA, NA, NA, NA, NA, NA, 134, NA, NA, NA, 70),
+  RUN_Rank = c(358, 137, 253, 258, 219, 230, 147, 185, 119, 108, 134, 185, 131, 91, 173, 134, 113, 214, 116, 81),
+  RECV_Rank = c(236, 132, 253, 180, 201, 235, 103, 185, 119, 189, 189, 230, 107, 79, 156, 121, 146, 332, 192, 81),
+  PBLK_Rank = c(103, 40, 30, 117, 44, 41, 20, 23, 39, 39, 41, 47, 18, 26, 59, 31, 25, 84, 30, 27),
+  RBLK_Rank = c(26, 44, 59, 27, 29, 30, 52, 21, 31, 29, 58, 26, 18, 23, 49, 30, 32, 54, 17, 25))
+
+# Print the data frame
+print(RB_player_stats)
+
+```
+```{r}
+# Create the third dataframe
+TE_player_stats <- data.frame(
+  Rank = c(2, 10, 15, 32, 33, 75, 88, 94, 99, 104, 119, 120, 135, 148, 154, 167, 198, 200, 209, 211, 220, 257, 276, 347, 402, 458, 465),
+  Name = c("Tyler Warren", "Kenyon Sadiq", "Miles Kitselman", "RJ Maryland", "Terrance Ferguson", "Mitchell Evans", "Matthew Hibner", "Cooper Flanagan", "Khalil Dinkins", "Matt Lauter", "Olsen Patt-Henry", "Lawson Luckie", "Zach Horton", "Benjamin Yurosek", "Holden Staes", "Gunnar Helm", "Matt Wagner", "Luke Reynolds", "Eli Raridon", "Jake Briningstool", "Chamon Metayer", "Oscar Delp", "Gee Scott Jr.", "Patrick Herbert", "Markeston Douglas", "Cameron Harpole", "Juan Davis"),
+  Team = c("PENN STATE", "OREGON", "TENNESSEE", "SMU", "OREGON", "NOTRE DAME", "SMU", "NOTRE DAME", "PENN STATE", "BOISE ST", "CLEMSON", "GEORGIA", "INDIANA", "GEORGIA", "TENNESSEE", "TEXAS", "BOISE ST", "PENN STATE", "NOTRE DAME", "CLEMSON", "ARIZONA ST", "GEORGIA", "OHIO STATE", "OREGON", "ARIZONA ST", "ARIZONA ST", "TEXAS"),
+  Number = c(44, 18, 87, 82, 3, 88, 88, 87, 16, 85, 11, 7, 44, 84, 19, 85, 88, 85, 9, 9, 7, 4, 88, 88, 18, 85, 81),
+  OFF = c(90.9, 81.6, 78.2, 73.1, 72.9, 66.9, 65.3, 64.9, 64.6, 64.5, 63.4, 63.3, 62.4, 61.6, 61.2, 60.8, 59.2, 59.1, 58.8, 58.7, 58.3, 56.3, 55.1, 51.7, 48.9, 43.4, 41.9),
+  PASS = c(53.8, 70.5, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RUN = c(79.3, 63.4, NA, NA, NA, NA, NA, NA, NA, NA, 60.5, 67.2, 64.5, 59.9, 68.4, 68.2, 67.1, 59.4, 68.0, 61.1, 59.5, 59.4, 55.2, 46.3, 47.2, 50.0, 48.0),
+  RECV = c(93.2, 76.1, 61.3, 75.9, 55.0, 67.0, 56.3, 58.8, 60.1, 30.5, 71.7, 69.1, 72.0, 69.6, 60.8, 70.0, 56.6, 73.0, 44.6, 54.0, 52.5, 34.5, 65.0, 51.8, 41.7, 68.0, 39.7),
+  PBLK = c(52.3, 78.6, 80.1, 66.9, 60.9, 61.1, 77.2, 71.4, 66.0, 48.0, 61.6, 47.9, 68.3, 63.7, 54.0, 46.4, 53.6, 51.0, 59.8, 50.9, 54.9, 55.0, 56.0, 55.3, 55.3, 44.5, 39.7),
+  RBLK = c(734, 332, 553, 245, 521, 365, 635, 233, 362, 684, 295, 430, 659, 346, 405, 847, 390, 218, 281, 648, 612, 491, 424, 379, 231, 232, 331),
+  OFF_Rank = c(6, 2, 2, NA, NA, 205, 267, 73, 114, 304, 100, 258, 236, 147, 135, 400, 97, 97, 95, 387, 274, 229, 207, 132, 38, 53, 132),
+  PASS_Rank = c(21, 7, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RUN_Rank = c(376, 140, NA, NA, NA, NA, NA, NA, NA, NA, 37, 155, 57, 27, 34, 91, 48, 114, 22, 24, 58, 31, 25, 19, 22, 15, 17),
+  RECV_Rank = c(15, 13, 192, 145, 263, 21, 51, 16, 34, 240, 37, 172, 236, 172, 236, 245, 243, 245, 250, 237, 255, 245, 243, 255, 275, 245, 255),
+  PBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  RBLK_Rank = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA)
+)
+
+# Print the dataframe
+print(TE_player_stats)
+
+```
+```{r}
+cfb_player_stats<- rbind.data.frame(QB_player_stats, RB_player_stats, WR_player_stats, TE_player_stats)
+```
+
